@@ -1,0 +1,22 @@
+name: ascend
+services:
+  app:
+    build: .
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-3001}:3001"
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3001
+      DATA_DIR: /data
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      AI_API_URL: ${AI_API_URL:-}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-}
+    volumes:
+      - ascend-data:/data
+volumes:
+  ascend-data:
+    name: ascend-data

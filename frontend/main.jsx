@@ -2129,8 +2129,8 @@ function Settings({ data, mutate, busy, notify, setModal }) {
             <div>
               <h2>Your data belongs to you</h2>
               <p>
-                This personal workspace saves your progress in a local SQLite
-                database.
+                Your progress is automatically saved to the server database.
+                Sign in to access your personal workspace again.
               </p>
             </div>
           </div>

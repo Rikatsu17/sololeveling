@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { db, databaseContext } from "./db.js";
+import { appRoot } from "./storage.js";
 import { installAccounts } from "./accounts.js";
 import {
   connected,
@@ -813,9 +814,10 @@ app.use((error, req, res, next) => {
       : error.message,
   });
 });
-if (existsSync("dist")) {
-  app.use(express.static(resolve("dist")));
-  app.get("*", (req, res) => res.sendFile(resolve("dist/index.html")));
+const builtApp = resolve(appRoot, "dist");
+if (existsSync(builtApp)) {
+  app.use(express.static(builtApp));
+  app.get("*", (req, res) => res.sendFile(resolve(builtApp, "index.html")));
 }
 const port = Number(process.env.PORT) || 3001;
 app.listen(port, process.env.HOST || "127.0.0.1", () =>

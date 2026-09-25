@@ -7,3 +7,9 @@ test-results/
 playwright-report/
 
 artifacts/
+backups/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.accounts/

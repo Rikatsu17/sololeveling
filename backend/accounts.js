@@ -10,14 +10,15 @@ import { promisify } from "node:util";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { databaseContext, openDatabase, seed, db } from "./db.js";
+import { storage } from "./storage.js";
 const scrypt = promisify(scryptCallback);
-const root =
-  process.env.ACCOUNTS_PATH ||
-  `${process.env.DATABASE_PATH || "backend/data/ascend.db"}.accounts`;
+const root = storage.accountsPath;
 mkdirSync(root, { recursive: true });
 const registry = new Database(join(root, "registry.db"));
 registry.pragma("journal_mode = WAL");
 registry.pragma("foreign_keys = ON");
+registry.pragma("synchronous = FULL");
+registry.pragma("busy_timeout = 5000");
 registry.exec(`CREATE TABLE IF NOT EXISTS Accounts(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,name TEXT NOT NULL,password_hash TEXT NOT NULL,salt TEXT NOT NULL,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS Sessions(token_hash TEXT PRIMARY KEY,account_id TEXT REFERENCES Accounts(id) ON DELETE CASCADE,expires_at INTEGER NOT NULL);`);
 const connections = new Map();

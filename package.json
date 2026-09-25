@@ -11,7 +11,8 @@
     "start": "node backend/server.js",
     "test": "node --test backend/*.test.js",
     "test:e2e": "npm run build && playwright test",
-    "format": "prettier --write frontend backend scripts tests *.js *.json *.html"
+    "format": "prettier --write frontend backend scripts tests *.js *.json *.html",
+    "db:backup": "node scripts/backup.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",

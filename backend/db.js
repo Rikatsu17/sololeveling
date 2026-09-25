@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { today } from "./domain.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { dirname } from "node:path";
+import { storage } from "./storage.js";
 export const databaseContext = new AsyncLocalStorage();
 const schema = `
 CREATE TABLE IF NOT EXISTS Users (id TEXT PRIMARY KEY, created_at TEXT NOT NULL);
@@ -29,12 +30,12 @@ export function openDatabase(path) {
   const connection = new Database(path);
   connection.pragma("journal_mode = WAL");
   connection.pragma("foreign_keys = ON");
+  connection.pragma("synchronous = FULL");
+  connection.pragma("busy_timeout = 5000");
   connection.exec(schema);
   return connection;
 }
-export const primaryDatabase = openDatabase(
-  process.env.DATABASE_PATH || "backend/data/ascend.db",
-);
+export const primaryDatabase = openDatabase(storage.databasePath);
 export const db = new Proxy(
   {},
   {

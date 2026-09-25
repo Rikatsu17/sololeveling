@@ -1,0 +1,16 @@
+.git
+node_modules
+dist
+backend/data
+backups
+artifacts
+test-results
+playwright-report
+.env
+.env.*
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite-*
+**/*.accounts
+*.log
