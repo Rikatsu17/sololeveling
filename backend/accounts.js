@@ -77,9 +77,18 @@ export function installAccounts(app, getState) {
       req.headers.origin
     ) {
       try {
-        if (new URL(req.headers.origin).host !== req.headers.host)
+        const origin = new URL(req.headers.origin);
+        // A preview/reverse proxy may rewrite Host after the browser made a
+        // same-origin request. Fetch Metadata is set by the browser, not page JS.
+        const sameOriginRequest =
+          req.headers["sec-fetch-site"] === "same-origin";
+        if (
+          !["http:", "https:"].includes(origin.protocol) ||
+          (origin.host !== req.headers.host && !sameOriginRequest)
+        )
           return res.status(403).json({
-            error: "This request must come from your Ascend workspace.",
+            error:
+              "Request blocked because its website origin could not be verified. Reload Ascend and try again.",
           });
       } catch {
         return res.status(403).json({ error: "Invalid request origin." });

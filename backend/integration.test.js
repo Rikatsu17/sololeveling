@@ -56,6 +56,27 @@ test("personal growth workflow persists atomic, auditable progress", async (t) =
   };
   const initial = (await req("/state")).body;
   assert.equal(initial.stats.length, 9);
+  // Simulate a public preview URL whose proxy rewrites Host to the backend.
+  const previewRequest = (site, origin = "https://ascend-preview.example") =>
+    fetch(`http://localhost:${port}/api/profile`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: origin,
+        ...(site ? { "Sec-Fetch-Site": site } : {}),
+      },
+      body: JSON.stringify({ name: initial.profile.name }),
+    });
+  assert.equal((await previewRequest("same-origin")).status, 200);
+  assert.equal((await previewRequest("cross-site")).status, 403);
+  assert.equal((await previewRequest("same-site")).status, 403);
+  assert.equal((await previewRequest(undefined)).status, 403);
+  assert.equal((await previewRequest("same-origin", "null")).status, 403);
+  assert.equal(
+    (await previewRequest(undefined, `http://localhost:${port}`)).status,
+    200,
+  );
+
   const quest = {
     title: "Integration practice",
     skillId: "programming",
