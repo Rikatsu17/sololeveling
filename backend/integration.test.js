@@ -12,6 +12,8 @@ test("personal growth workflow persists atomic, auditable progress", async (t) =
     env: {
       ...process.env,
       PORT: String(port),
+      AI_API_KEY: "",
+      ACCOUNTS_PATH: join(dir, "accounts"),
       DATABASE_PATH: join(dir, "test.db"),
     },
   });
@@ -37,13 +39,20 @@ test("personal growth workflow persists atomic, auditable progress", async (t) =
     });
     server.on("error", reject);
   });
-  const req = async (path, method = "GET", body) => {
+  const req = async (path, method = "GET", body, cookie) => {
     const r = await fetch(`http://localhost:${port}/api${path}`, {
       method,
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
-    return { status: r.status, body: await r.json() };
+    return {
+      status: r.status,
+      body: await r.json(),
+      cookie: r.headers.get("set-cookie")?.split(";")[0],
+    };
   };
   const initial = (await req("/state")).body;
   assert.equal(initial.stats.length, 9);
@@ -120,4 +129,76 @@ test("personal growth workflow persists atomic, auditable progress", async (t) =
   const exported = await req("/export");
   assert.equal(exported.body.profile.name, "Test learner");
   assert.ok(exported.body.transactions.length > 0);
+  const a = await req("/auth/register", "POST", {
+    name: "Learner A",
+    email: "a@example.test",
+    password: "safe-password-a",
+  });
+  assert.equal(a.status, 200);
+  assert.ok(a.cookie);
+  assert.equal(a.body.state.account.email, "a@example.test");
+  const b = await req("/auth/register", "POST", {
+    name: "Learner B",
+    email: "b@example.test",
+    password: "safe-password-b",
+  });
+  assert.equal(b.status, 200);
+  const beforeA = (await req("/state", "GET", undefined, a.cookie)).body;
+  const logged = await req(
+    "/log/confirm",
+    "POST",
+    {
+      title: "Only learner A did this",
+      xp: 70,
+      minutes: 40,
+      skillId: "programming",
+      statIds: ["intellect"],
+    },
+    a.cookie,
+  );
+  assert.equal(logged.status, 200);
+  assert.equal(logged.body.state.profile.totalXp, beforeA.profile.totalXp + 70);
+  const stateB = (await req("/state", "GET", undefined, b.cookie)).body;
+  assert.equal(stateB.profile.name, "Learner B");
+  assert.equal(stateB.profile.totalXp, beforeA.profile.totalXp);
+  assert.ok(!stateB.quests.some((q) => q.title === "Only learner A did this"));
+  assert.equal((await req("/state")).body.profile.name, "Test learner");
+  const badLogin = await req("/auth/login", "POST", {
+    email: "a@example.test",
+    password: "wrong-password",
+  });
+  assert.equal(badLogin.status, 401);
+  const login = await req("/auth/login", "POST", {
+    email: "a@example.test",
+    password: "safe-password-a",
+  });
+  assert.equal(login.status, 200);
+  assert.equal(login.body.state.profile.totalXp, beforeA.profile.totalXp + 70);
+  const changed = await req(
+    "/auth/password",
+    "POST",
+    { currentPassword: "safe-password-a", password: "new-safe-password" },
+    login.cookie,
+  );
+  assert.equal(changed.status, 200);
+  assert.equal((await req("/state", "GET", undefined, a.cookie)).status, 401);
+  assert.equal(
+    (
+      await req("/auth/login", "POST", {
+        email: "a@example.test",
+        password: "safe-password-a",
+      })
+    ).status,
+    401,
+  );
+  const newLogin = await req("/auth/login", "POST", {
+    email: "a@example.test",
+    password: "new-safe-password",
+  });
+  assert.equal(newLogin.status, 200);
+  await req("/auth/logout", "POST", {}, newLogin.cookie);
+  assert.equal(
+    (await req("/state", "GET", undefined, newLogin.cookie)).status,
+    401,
+  );
 });

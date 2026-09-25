@@ -5,3 +5,5 @@ backend/data/
 *.log
 test-results/
 playwright-report/
+
+artifacts/

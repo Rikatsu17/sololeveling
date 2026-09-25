@@ -1,13 +1,10 @@
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { today } from "./domain.js";
-mkdirSync("backend/data", { recursive: true });
-export const db = new Database(
-  process.env.DATABASE_PATH || "backend/data/ascend.db",
-);
-db.pragma("journal_mode = WAL");
-db.pragma("foreign_keys = ON");
-db.exec(`
+import { AsyncLocalStorage } from "node:async_hooks";
+import { dirname } from "node:path";
+export const databaseContext = new AsyncLocalStorage();
+const schema = `
 CREATE TABLE IF NOT EXISTS Users (id TEXT PRIMARY KEY, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS Profiles (user_id TEXT PRIMARY KEY REFERENCES Users(id), name TEXT NOT NULL, role TEXT, bio TEXT, xp INTEGER DEFAULT 0, onboarded INTEGER DEFAULT 0, daily_minutes INTEGER DEFAULT 60, assessment TEXT DEFAULT '{}', preferences TEXT DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS Stats (id TEXT PRIMARY KEY, user_id TEXT REFERENCES Users(id), name TEXT NOT NULL, description TEXT, xp INTEGER DEFAULT 0, color TEXT, icon TEXT);
@@ -23,9 +20,32 @@ CREATE TABLE IF NOT EXISTS Achievements (id TEXT PRIMARY KEY, title TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS UserAchievements (achievement_id TEXT PRIMARY KEY REFERENCES Achievements(id), user_id TEXT REFERENCES Users(id), unlocked_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS AIRecommendations (id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, quest TEXT NOT NULL, status TEXT DEFAULT 'pending', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS AIConversations (id INTEGER PRIMARY KEY, user_id TEXT REFERENCES Users(id), role TEXT NOT NULL, content TEXT NOT NULL, action TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS ProgressEvents (id TEXT PRIMARY KEY, event_type TEXT NOT NULL, title TEXT NOT NULL, description TEXT, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS xp_date ON XPTransactions(created_at);
 CREATE INDEX IF NOT EXISTS quest_date ON Quests(due_date);
-`);
+`;
+export function openDatabase(path) {
+  mkdirSync(dirname(path), { recursive: true });
+  const connection = new Database(path);
+  connection.pragma("journal_mode = WAL");
+  connection.pragma("foreign_keys = ON");
+  connection.exec(schema);
+  return connection;
+}
+export const primaryDatabase = openDatabase(
+  process.env.DATABASE_PATH || "backend/data/ascend.db",
+);
+export const db = new Proxy(
+  {},
+  {
+    get(_target, property) {
+      const connection =
+        databaseContext.getStore()?.database || primaryDatabase;
+      const value = connection[property];
+      return typeof value === "function" ? value.bind(connection) : value;
+    },
+  },
+);
 const uid = "local";
 const ago = (n) => {
   const d = new Date();

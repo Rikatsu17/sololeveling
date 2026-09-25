@@ -213,6 +213,12 @@ function App() {
     [mobile, setMobile] = useState(false),
     [error, setError] = useState("");
   const timer = useRef();
+  useEffect(() => {
+    document.documentElement.classList.toggle(
+      "reduce-motion",
+      !!data?.profile.preferences.reducedMotion,
+    );
+  }, [data?.profile.preferences.reducedMotion]);
   const notify = (message, rewards) => {
     setToast({ message, rewards });
     clearTimeout(timer.current);
@@ -297,6 +303,7 @@ function App() {
           {nav.map(([name, icon]) => (
             <button
               key={name}
+              aria-label={name}
               className={`nav-item ${page === name ? "active" : ""}`}
               onClick={() => go(name)}
             >
@@ -354,7 +361,13 @@ function App() {
             </div>
             <div>
               <strong>{p.name}</strong>
-              <span>{p.onboarded ? "Personal account" : "Demo workspace"}</span>
+              <span>
+                {data.account
+                  ? "Personal account"
+                  : p.onboarded
+                    ? "Local workspace"
+                    : "Demo workspace"}
+              </span>
             </div>
             <I name="ChevronsUpDown" size={15} />
           </button>
@@ -376,6 +389,14 @@ function App() {
             <strong>{allPages.includes(page) ? page : "Dashboard"}</strong>
           </div>
           <div className="topbar-right">
+            {!data.account && (
+              <button
+                className="header-signin"
+                onClick={() => setModal({ type: "auth" })}
+              >
+                Sign in <I name="ArrowRight" size={13} />
+              </button>
+            )}
             <span className="system-status">
               <span />
               System online
@@ -1481,6 +1502,11 @@ function Analytics({ data, go }) {
 function Timeline({ data, setModal }) {
   const [filter, setFilter] = useState("All");
   const entries = [
+    ...(data.events || []).map((event) => ({
+      ...event,
+      type: "Level",
+      at: event.created_at,
+    })),
     ...data.completions.map((c) => ({
       ...c,
       type: "Action",
@@ -1525,7 +1551,7 @@ function Timeline({ data, setModal }) {
         }
       />
       <div className="filter-tabs timeline-filters">
-        {["All", "Action", "Achievement", "Profile"].map((t) => (
+        {["All", "Action", "Level", "Achievement", "Profile"].map((t) => (
           <button
             key={t}
             className={filter === t ? "selected" : ""}
@@ -1557,9 +1583,11 @@ function Timeline({ data, setModal }) {
                       name={
                         e.type === "Achievement"
                           ? "Award"
-                          : e.type === "Action"
-                            ? "Check"
-                            : "SlidersHorizontal"
+                          : e.type === "Level"
+                            ? "TrendingUp"
+                            : e.type === "Action"
+                              ? "Check"
+                              : "SlidersHorizontal"
                       }
                       size={18}
                     />
@@ -1570,7 +1598,9 @@ function Timeline({ data, setModal }) {
                         ? "PROGRESS LOGGED"
                         : e.type === "Achievement"
                           ? "MILESTONE WORTH CELEBRATING"
-                          : "PROFILE UPDATED"}
+                          : e.type === "Level"
+                            ? "A NEW LEVEL OF PRACTICE"
+                            : "PROFILE UPDATED"}
                     </span>
                     <h3>{e.title}</h3>
                     <p>
@@ -1669,11 +1699,9 @@ function Achievements({ data }) {
 function Chat({ data, mutate, busy, setModal }) {
   const [message, setMessage] = useState("");
   const bottom = useRef();
-  useEffect(
-    () =>
-      bottom.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }),
-    [data.conversations.length],
-  );
+  useEffect(() => {
+    bottom.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [data.conversations.length]);
   const send = async (text) => {
     if (!text.trim() || busy) return;
     const result = await mutate("/chat", "POST", { message: text });
@@ -1960,7 +1988,7 @@ function Profile({ data, setModal, mutate, busy }) {
     </>
   );
 }
-function Settings({ data, mutate, busy, notify }) {
+function Settings({ data, mutate, busy, notify, setModal }) {
   const [minutes, setMinutes] = useState(data.profile.daily_minutes);
   const [reduced, setReduced] = useState(
     data.profile.preferences.reducedMotion || false,
@@ -1976,6 +2004,43 @@ function Settings({ data, mutate, busy, notify }) {
         description="A system that fits your life, with you in control."
       />
       <div className="settings-stack">
+        <section className="panel settings-panel">
+          <div className="settings-title">
+            <I name="LockKeyhole" />
+            <div>
+              <h2>{data.account ? "Your account" : "A space of your own"}</h2>
+              <p>
+                {data.account
+                  ? data.account.email
+                  : "Create an account to keep your personal progress in a separate, protected workspace."}
+              </p>
+            </div>
+          </div>
+          <div className="account-actions">
+            {data.account ? (
+              <>
+                <Button onClick={() => setModal({ type: "password" })}>
+                  Change password
+                </Button>
+                <Button
+                  onClick={async () => {
+                    await mutate("/auth/logout", "POST", {}, "Signed out");
+                  }}
+                >
+                  Sign out
+                </Button>
+              </>
+            ) : (
+              <Button
+                variant="primary"
+                icon="ArrowRight"
+                onClick={() => setModal({ type: "auth", register: true })}
+              >
+                Create an account
+              </Button>
+            )}
+          </div>
+        </section>
         <section className="panel settings-panel">
           <div className="settings-title">
             <I name="Clock3" />
@@ -2111,7 +2176,10 @@ function Field({ label, children, hint }) {
   return (
     <label className="field">
       <span>{label}</span>
-      {children}
+      {React.cloneElement(children, {
+        "aria-label": label,
+        ...(hint ? { "aria-description": hint } : {}),
+      })}
       {hint && <small>{hint}</small>}
     </label>
   );
@@ -2178,7 +2246,11 @@ function ModalHost({ modal, close, data, mutate, busy, notify, setModal }) {
         >
           <I name="X" />
         </button>
-        {modal.type === "log" ? (
+        {modal.type === "auth" ? (
+          <AuthModal {...common} />
+        ) : modal.type === "password" ? (
+          <PasswordModal {...common} />
+        ) : modal.type === "log" ? (
           <LogModal {...common} />
         ) : modal.type === "quest" ? (
           <QuestForm {...common} />
@@ -2438,8 +2510,10 @@ function LogModal({ data, mutate, busy, close, notify }) {
             ))}
           </div>
           <div className="info-note">
-            <I name="Info" size={15} />A local estimate based on duration and
-            activity. You can edit every field before saving.
+            <I name="Info" size={15} />
+            {data.aiMode === "connected"
+              ? "Your AI provider will estimate skills and XP. Review every field before saving."
+              : "A local estimate based on duration and activity. You can edit every field before saving."}
           </div>
           <div className="modal-actions">
             <Button
@@ -2694,53 +2768,25 @@ function EntityDetail({ modal, data, setModal }) {
     </>
   );
 }
-function GoalForm({ mutate, busy, close }) {
+function GoalForm({ mutate, busy, close, notify }) {
   const [title, setTitle] = useState(""),
     [description, setDescription] = useState(""),
     [category, setCategory] = useState("Personal"),
     [date, setDate] = useState(""),
     [milestones, setMilestones] = useState(""),
     [generated, setGenerated] = useState(false);
-  const roadmap = () => {
-    let steps;
-    if (/run|бег/i.test(title))
-      steps = [
-        "Find a comfortable starting distance",
-        "Build a three-day weekly running routine",
-        "Increase distance gradually",
-        "Complete your target distance",
-      ];
-    else if (/english|korean|language|англий|язык/i.test(title))
-      steps = [
-        "Assess your current language level",
-        "Build a daily vocabulary habit",
-        "Practice real conversations weekly",
-        "Review progress with a practice test",
-      ];
-    else if (/develop|code|program|программ|разработ/i.test(title))
-      steps = [
-        "Learn the language fundamentals",
-        "Build your first small project",
-        "Practice APIs and data storage",
-        "Publish a portfolio project",
-      ];
-    else if (/piano|music|пианино/i.test(title))
-      steps = [
-        "Learn posture and basic notation",
-        "Practice scales and simple chords",
-        "Learn your first complete song",
-        "Record a performance and reflect",
-      ];
-    else
-      steps = [
-        "Define a clear, achievable outcome",
-        "Choose your first resource or mentor",
-        "Build a weekly practice habit",
-        "Complete a practical milestone",
-        "Reflect and choose the next step",
-      ];
-    setMilestones(steps.join("\n"));
-    setGenerated(true);
+  const [generating, setGenerating] = useState(false);
+  const roadmap = async () => {
+    setGenerating(true);
+    try {
+      const result = await api("/goals/roadmap", "POST", { title });
+      setMilestones(result.milestones.join("\n"));
+      setGenerated(result.mode);
+    } catch (error) {
+      notify(error.message);
+    } finally {
+      setGenerating(false);
+    }
   };
   return (
     <form
@@ -2818,17 +2864,19 @@ function GoalForm({ mutate, busy, close }) {
         <button
           className="text-link"
           type="button"
-          disabled={!title.trim()}
+          disabled={generating || !title.trim()}
           onClick={roadmap}
         >
           <I name="Sparkles" size={13} />
-          Suggest roadmap
+          {generating ? "Preparing…" : "Suggest roadmap"}
         </button>
       </div>
       <Field
         label={
           generated
-            ? "Suggested starter template — edit to fit your goal"
+            ? generated === "ai"
+              ? "AI roadmap — review and edit your milestones"
+              : "Suggested starter template — edit to fit your goal"
             : "One milestone per line"
         }
       >
@@ -2856,7 +2904,7 @@ function GoalForm({ mutate, busy, close }) {
 function Onboarding({ data, mutate, busy, close }) {
   const [step, setStep] = useState(0);
   const [form, setForm] = useState({
-    name: "",
+    name: data.account?.name || "",
     age: "18–24",
     occupation: "",
     goal: "",
@@ -3090,6 +3138,154 @@ function Onboarding({ data, mutate, busy, close }) {
           disabled={busy}
         >
           {step === 2 ? "Create my starting point" : "Continue"}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+function AuthModal({ modal, mutate, busy, close, setModal }) {
+  const [register, setRegister] = useState(!!modal.register);
+  const [form, setForm] = useState({ name: "", email: "", password: "" });
+  const [issue, setIssue] = useState("");
+  return (
+    <form
+      onSubmit={async (e) => {
+        e.preventDefault();
+        setIssue("");
+        const result = await mutate(
+          register ? "/auth/register" : "/auth/login",
+          "POST",
+          form,
+          register ? "Your account is ready" : "Welcome back",
+        );
+        if (result) {
+          if (register || !result.state.profile.onboarded)
+            setModal({ type: "onboarding" });
+          else close();
+        } else
+          setIssue(
+            "Check your details and try again. See the notification for more information.",
+          );
+      }}
+    >
+      <span className="modal-symbol">
+        <I name="LockKeyhole" />
+      </span>
+      <span className="eyebrow">YOUR OWN SPACE TO GROW</span>
+      <h2>
+        {register ? "Your next chapter starts here." : "Good to have you back."}
+      </h2>
+      <p>
+        {register
+          ? "Create a private workspace, then build your starting profile. Your progress is stored separately from the demo."
+          : "Sign in to pick up where you left off."}
+      </p>
+      {register && (
+        <Field label="Your name">
+          <input
+            required
+            autoComplete="name"
+            maxLength={80}
+            value={form.name}
+            onChange={(e) => setForm({ ...form, name: e.target.value })}
+          />
+        </Field>
+      )}
+      <Field label="Email address">
+        <input
+          required
+          type="email"
+          autoComplete="email"
+          maxLength={254}
+          value={form.email}
+          onChange={(e) => setForm({ ...form, email: e.target.value })}
+        />
+      </Field>
+      <Field label="Password" hint="At least 10 characters.">
+        <input
+          required
+          type="password"
+          autoComplete={register ? "new-password" : "current-password"}
+          minLength={10}
+          maxLength={128}
+          value={form.password}
+          onChange={(e) => setForm({ ...form, password: e.target.value })}
+        />
+      </Field>
+      {issue && (
+        <p className="form-error" role="alert">
+          {issue}
+        </p>
+      )}
+      <div className="modal-actions">
+        <button
+          className="text-link"
+          type="button"
+          onClick={() => {
+            setRegister(!register);
+            setIssue("");
+          }}
+        >
+          {register
+            ? "Already have an account? Sign in"
+            : "New here? Create an account"}
+        </button>
+        <Button type="submit" variant="primary" disabled={busy}>
+          {busy ? "One moment…" : register ? "Create account" : "Sign in"}
+        </Button>
+      </div>
+    </form>
+  );
+}
+function PasswordModal({ mutate, busy, close }) {
+  const [currentPassword, setCurrent] = useState("");
+  const [password, setPassword] = useState("");
+  return (
+    <form
+      onSubmit={async (e) => {
+        e.preventDefault();
+        if (
+          await mutate(
+            "/auth/password",
+            "POST",
+            { currentPassword, password },
+            "Password changed. Other sessions have been signed out.",
+          )
+        )
+          close();
+      }}
+    >
+      <span className="eyebrow">ACCOUNT SECURITY</span>
+      <h2>Update your password.</h2>
+      <p>Your other sessions will be signed out after this change.</p>
+      <Field label="Current password">
+        <input
+          required
+          type="password"
+          autoComplete="current-password"
+          maxLength={128}
+          value={currentPassword}
+          onChange={(e) => setCurrent(e.target.value)}
+        />
+      </Field>
+      <Field label="New password" hint="At least 10 characters.">
+        <input
+          required
+          type="password"
+          autoComplete="new-password"
+          minLength={10}
+          maxLength={128}
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+      </Field>
+      <div className="modal-actions">
+        <Button type="button" onClick={close}>
+          Cancel
+        </Button>
+        <Button type="submit" variant="primary" disabled={busy}>
+          Update password
         </Button>
       </div>
     </form>

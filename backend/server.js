@@ -2,7 +2,15 @@ import express from "express";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { db } from "./db.js";
+import { db, databaseContext } from "./db.js";
+import { installAccounts } from "./accounts.js";
+import {
+  connected,
+  askModel,
+  modelJSON,
+  checkedSuggestion,
+  starterRoadmap,
+} from "./assistant.js";
 import {
   today,
   levelInfo,
@@ -12,6 +20,7 @@ import {
 } from "./domain.js";
 const app = express();
 app.use(express.json({ limit: "100kb" }));
+installAccounts(app, () => state());
 const all = (sql, ...args) => db.prepare(sql).all(...args);
 const get = (sql, ...args) => db.prepare(sql).get(...args);
 const run = (sql, ...args) => db.prepare(sql).run(...args);
@@ -43,26 +52,45 @@ function entities() {
   };
 }
 function suggestion() {
-  const { skills, stats } = entities();
+  const { skills } = entities();
+  const since = new Date(Date.now() - 7 * 86400000).toISOString();
   const counts = all(
-    "SELECT entity_id, SUM(amount) xp FROM XPTransactions WHERE entity_type='skill' AND created_at >= ? GROUP BY entity_id",
-    new Date(Date.now() - 7 * 86400000).toISOString(),
+    "SELECT entity_id, SUM(amount) xp FROM XPTransactions WHERE entity_type='skill' AND completion_id IS NOT NULL AND created_at >= ? GROUP BY entity_id",
+    since,
   );
-  const skill = [...skills].sort(
-    (a, b) =>
-      (counts.find((x) => x.entity_id === a.id)?.xp || 0) -
-      (counts.find((x) => x.entity_id === b.id)?.xp || 0),
-  )[0];
+  const handled = all(
+    "SELECT quest FROM AIRecommendations WHERE created_at >= ?",
+    today(),
+  ).map((row) => JSON.parse(row.quest).skillId);
+  const skill = [...skills]
+    .filter((skill) => !handled.includes(skill.id))
+    .sort(
+      (a, b) =>
+        (counts.find((x) => x.entity_id === a.id)?.xp || 0) -
+        (counts.find((x) => x.entity_id === b.id)?.xp || 0),
+    )[0];
   if (!skill) return null;
   const daily = get("SELECT daily_minutes FROM Profiles").daily_minutes;
   const pending = all(
-    "SELECT * FROM Quests WHERE due_date < ? AND completed_at IS NULL",
+    "SELECT id FROM Quests WHERE due_date < ? AND completed_at IS NULL",
     today(),
   ).length;
-  const minutes = Math.min(daily, pending > 3 ? 15 : 25);
+  const recent = all(
+    "SELECT completed_at,difficulty FROM Quests WHERE due_date >= ? AND due_date <= ?",
+    since.slice(0, 10),
+    today(),
+  );
+  const completed = recent.filter((q) => q.completed_at).length;
+  const ready = completed >= 5 && completed / Math.max(1, recent.length) >= 0.8;
+  const minutes = Math.min(daily, pending > 3 ? 15 : ready ? 40 : 25);
   return {
     title: `Make a little room for ${skill.name.toLowerCase()}`,
-    description: `${skill.name} has received less attention this week. A ${minutes}-minute session is a small, achievable next step.`,
+    description:
+      pending > 3
+        ? `Your schedule looks full. Try a lighter ${minutes}-minute ${skill.name.toLowerCase()} session and leave room to recover.`
+        : ready
+          ? `You've been following through consistently. Try a slightly more challenging ${minutes}-minute ${skill.name.toLowerCase()} session.`
+          : `${skill.name} has received less attention this week. A ${minutes}-minute session is a small, achievable next step.`,
     quest: {
       title: `Practice ${skill.name.toLowerCase()} for ${minutes} minutes`,
       minutes,
@@ -70,7 +98,7 @@ function suggestion() {
       skillId: skill.id,
       statIds: skill.statIds,
       type: "AI Suggested",
-      difficulty: "Easy",
+      difficulty: ready && pending <= 3 ? "Moderate" : "Easy",
     },
   };
 }
@@ -110,6 +138,7 @@ function state() {
       );
   });
   return {
+    account: databaseContext.getStore()?.account || null,
     profile: {
       ...profile,
       ...levelInfo(profile.xp, 1000),
@@ -127,10 +156,10 @@ function state() {
     streak,
     totals,
     transactions: all(
-      "SELECT * FROM XPTransactions ORDER BY created_at DESC,id DESC LIMIT 500",
+      "SELECT * FROM XPTransactions ORDER BY created_at DESC,id DESC",
     ),
     completions: all(
-      "SELECT * FROM QuestCompletions ORDER BY completed_at DESC LIMIT 200",
+      "SELECT * FROM QuestCompletions ORDER BY completed_at DESC",
     ),
     achievements: all(
       "SELECT a.*,u.unlocked_at FROM Achievements a LEFT JOIN UserAchievements u ON a.id=u.achievement_id",
@@ -139,6 +168,7 @@ function state() {
       current: Math.min(metrics[a.metric] || 0, a.target),
     })),
     recommendation: suggestion(),
+    events: all("SELECT * FROM ProgressEvents ORDER BY created_at DESC"),
     conversations: all("SELECT * FROM AIConversations ORDER BY id").map(
       (c) => ({ ...c, action: c.action ? JSON.parse(c.action) : null }),
     ),
@@ -153,7 +183,13 @@ function addQuest(data) {
       ? data.skillId
       : null;
   const statIds = Array.isArray(data.statIds)
-    ? data.statIds.filter((id) => get("SELECT id FROM Stats WHERE id=?", id))
+    ? [
+        ...new Set(
+          data.statIds.filter((id) =>
+            get("SELECT id FROM Stats WHERE id=?", id),
+          ),
+        ),
+      ]
     : [];
   const type = [
     "Daily",
@@ -190,81 +226,93 @@ function addQuest(data) {
   );
   return id;
 }
-const complete = db.transaction((id) => {
-  const q = get("SELECT * FROM Quests WHERE id=?", id);
-  if (!q) throw new Error("Quest not found.");
-  if (q.completed_at) throw new Error("This quest is already complete.");
-  const repetitions = get(
-    "SELECT COUNT(*) count FROM QuestCompletions WHERE lower(title)=lower(?) AND completed_at>=?",
-    q.title,
-    today(),
-  ).count;
-  const xp = rewardFor(q, repetitions);
-  const cid = randomUUID();
-  const at = stamp();
-  const rewards = [];
-  run("UPDATE Quests SET completed_at=? WHERE id=?", at, id);
-  run(
-    "INSERT INTO QuestCompletions VALUES (?,?,?,?,?,?)",
-    cid,
-    id,
-    q.title,
-    xp,
-    q.minutes,
-    at,
-  );
-  const grant = (type, entityId, amount, table, step) => {
-    const before = get(
-      `SELECT xp,name FROM ${table} WHERE ${table === "Profiles" ? "user_id" : "id"}=?`,
-      entityId,
-    );
-    if (!before) return;
-    run(
-      `UPDATE ${table} SET xp=xp+? WHERE ${table === "Profiles" ? "user_id" : "id"}=?`,
-      amount,
-      entityId,
-    );
-    run(
-      "INSERT INTO XPTransactions (user_id,completion_id,entity_type,entity_id,amount,reason,created_at) VALUES (?,?,?,?,?,?,?)",
-      "local",
-      cid,
-      type,
-      entityId,
-      amount,
+const complete = (questId) =>
+  db.transaction((id) => {
+    const q = get("SELECT * FROM Quests WHERE id=?", id);
+    if (!q) throw new Error("Quest not found.");
+    if (q.completed_at) throw new Error("This quest is already complete.");
+    const repetitions = get(
+      "SELECT COUNT(*) count FROM QuestCompletions WHERE lower(title)=lower(?) AND completed_at>=?",
       q.title,
-      at,
-    );
-    rewards.push({
-      name: type === "overall" ? "Overall" : before.name,
-      xp: amount,
-      levelUp:
-        Math.floor((before.xp + amount) / step) > Math.floor(before.xp / step),
-      level: Math.floor((before.xp + amount) / step) + 1,
-    });
-  };
-  grant("overall", "local", xp, "Profiles", 1000);
-  if (q.skill_id) {
-    grant("skill", q.skill_id, xp, "Skills", 500);
+      today(),
+    ).count;
+    const xp = rewardFor(q, repetitions);
+    const cid = randomUUID();
+    const at = stamp();
+    const rewards = [];
+    run("UPDATE Quests SET completed_at=? WHERE id=?", at, id);
     run(
-      "INSERT INTO SkillProgress (skill_id,xp,recorded_at) VALUES (?,?,?)",
-      q.skill_id,
+      "INSERT INTO QuestCompletions VALUES (?,?,?,?,?,?)",
+      cid,
+      id,
+      q.title,
       xp,
+      q.minutes,
       at,
     );
-  }
-  JSON.parse(q.stat_ids).forEach((s) =>
-    grant("stat", s, Math.max(1, Math.round(xp * 0.3)), "Stats", 200),
-  );
-  run(
-    "INSERT INTO DailyActivity VALUES (?,?,?,1) ON CONFLICT(date) DO UPDATE SET xp=xp+excluded.xp,minutes=minutes+excluded.minutes,quests=quests+1",
-    today(),
-    xp,
-    q.minutes,
-  );
-  if (q.milestone_id)
-    run("UPDATE Milestones SET completed=1 WHERE id=?", q.milestone_id);
-  return { rewards, xp };
-});
+    const grant = (type, entityId, amount, table, step) => {
+      const before = get(
+        `SELECT xp,name FROM ${table} WHERE ${table === "Profiles" ? "user_id" : "id"}=?`,
+        entityId,
+      );
+      if (!before) return;
+      run(
+        `UPDATE ${table} SET xp=xp+? WHERE ${table === "Profiles" ? "user_id" : "id"}=?`,
+        amount,
+        entityId,
+      );
+      run(
+        "INSERT INTO XPTransactions (user_id,completion_id,entity_type,entity_id,amount,reason,created_at) VALUES (?,?,?,?,?,?,?)",
+        "local",
+        cid,
+        type,
+        entityId,
+        amount,
+        q.title,
+        at,
+      );
+      const nextLevel = Math.floor((before.xp + amount) / step) + 1;
+      if (nextLevel > Math.floor(before.xp / step) + 1)
+        run(
+          "INSERT INTO ProgressEvents VALUES (?,?,?,?,?)",
+          randomUUID(),
+          "level",
+          `${type === "overall" ? "Overall" : before.name} reached Level ${nextLevel}`,
+          q.title,
+          at,
+        );
+      rewards.push({
+        name: type === "overall" ? "Overall" : before.name,
+        xp: amount,
+        levelUp:
+          Math.floor((before.xp + amount) / step) >
+          Math.floor(before.xp / step),
+        level: Math.floor((before.xp + amount) / step) + 1,
+      });
+    };
+    grant("overall", "local", xp, "Profiles", 1000);
+    if (q.skill_id) {
+      grant("skill", q.skill_id, xp, "Skills", 500);
+      run(
+        "INSERT INTO SkillProgress (skill_id,xp,recorded_at) VALUES (?,?,?)",
+        q.skill_id,
+        xp,
+        at,
+      );
+    }
+    JSON.parse(q.stat_ids).forEach((s) =>
+      grant("stat", s, Math.max(1, Math.round(xp * 0.3)), "Stats", 200),
+    );
+    run(
+      "INSERT INTO DailyActivity VALUES (?,?,?,1) ON CONFLICT(date) DO UPDATE SET xp=xp+excluded.xp,minutes=minutes+excluded.minutes,quests=quests+1",
+      today(),
+      xp,
+      q.minutes,
+    );
+    if (q.milestone_id)
+      run("UPDATE Milestones SET completed=1 WHERE id=?", q.milestone_id);
+    return { rewards, xp };
+  })(questId);
 app.get("/api/state", (req, res) => res.json(state()));
 app.post("/api/quests", (req, res) => {
   const id = addQuest(req.body);
@@ -277,16 +325,31 @@ app.delete("/api/quests/:id", (req, res) => {
   run("DELETE FROM Quests WHERE id=? AND completed_at IS NULL", req.params.id);
   res.json(state());
 });
-app.post("/api/log/preview", (req, res) => {
-  const { skills, stats } = entities();
-  res.json(
-    suggestAction(
-      requireText(req.body.text, "Description"),
-      skills,
-      stats,
-      req.body.minutes,
-    ),
-  );
+app.post("/api/log/preview", async (req, res, next) => {
+  try {
+    const { skills, stats } = entities();
+    const description = requireText(req.body.text, "Description");
+    if (!connected())
+      return res.json({
+        ...suggestAction(description, skills, stats, req.body.minutes),
+        estimator: "local",
+      });
+    const content = await askModel([
+      {
+        role: "system",
+        content: `Estimate a fair reward for a real-life action. Return only JSON with title, minutes (5-480), xp (5-200), skillId or null, statIds array, difficulty (Easy, Moderate, Challenging). Choose only existing IDs. Consider complexity and real learning, avoid rewarding trivial repetition. The user will review every field. Available skills: ${JSON.stringify(skills)}. Stats: ${JSON.stringify(stats)}.`,
+      },
+      { role: "user", content: description },
+    ]);
+    const suggestion = checkedSuggestion(modelJSON(content), skills, stats);
+    if (!suggestion)
+      throw new Error(
+        "The AI estimate was not in a usable format. Please try again.",
+      );
+    res.json({ ...suggestion, estimator: "ai" });
+  } catch (error) {
+    next(error);
+  }
 });
 app.post("/api/log/confirm", (req, res) => {
   const result = db.transaction(() =>
@@ -399,6 +462,37 @@ for (const [route, table, step] of [
     res.json(state());
   });
 }
+app.post("/api/goals/roadmap", async (req, res, next) => {
+  try {
+    const title = requireText(req.body.title);
+    if (!connected())
+      return res.json({ milestones: starterRoadmap(title), mode: "local" });
+    const profile = get("SELECT assessment,daily_minutes FROM Profiles");
+    const raw = await askModel([
+      {
+        role: "system",
+        content: `Create a sustainable personal learning roadmap. Return only JSON {"milestones":["milestone title",...]}, 3-8 concrete milestones in the user's language. Profile: ${JSON.stringify(profile)}.`,
+      },
+      { role: "user", content: title },
+    ]);
+    const parsed = modelJSON(raw);
+    const milestones = parsed?.milestones;
+    if (
+      !Array.isArray(milestones) ||
+      milestones.length < 1 ||
+      milestones.length > 15 ||
+      milestones.some(
+        (m) => typeof m !== "string" || !m.trim() || m.length > 500,
+      )
+    )
+      throw new Error(
+        "The roadmap was not in a usable format. Please try again.",
+      );
+    res.json({ milestones, mode: "ai" });
+  } catch (error) {
+    next(error);
+  }
+});
 app.post("/api/goals", (req, res) => {
   const id = randomUUID();
   db.transaction(() => {
@@ -460,6 +554,7 @@ app.patch("/api/profile", (req, res) => {
 app.post("/api/onboarding", (req, res) => {
   const d = req.body;
   db.transaction(() => {
+    run("DELETE FROM ProgressEvents");
     run("DELETE FROM AIConversations");
     run("DELETE FROM AIRecommendations");
     run("DELETE FROM XPTransactions");
@@ -657,37 +752,21 @@ app.post("/api/chat", async (req, res, next) => {
       content = `You have ${s.quests.filter((q) => !q.completed_at && q.due_date === today()).length} open actions today and a ${s.streak}-day streak. ${s.profile.assessment.goal ? `Your priority is “${s.profile.assessment.goal}”. ` : ""}\n\n${skill ? `A focused ${mins}-minute ${skill.name.toLowerCase()} session would be a useful next step. Start with one clear outcome, remove distractions, and write down what you learned.` : "Create your first skill, then choose one small action to practice it."}\n\n${s.quests.filter((q) => !q.completed_at && q.due_date < today()).length > 3 ? "Some tasks are overdue. Reduce the scope today; a short session still counts." : "Consistency matters more than a perfect day. You can adjust this suggestion before adding it."}`;
     }
     let mode = "local";
-    if (process.env.AI_API_KEY && process.env.AI_API_URL) {
-      const response = await fetch(process.env.AI_API_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${process.env.AI_API_KEY}`,
+    if (connected()) {
+      const raw = await askModel([
+        {
+          role: "system",
+          content: `You are a supportive personal development assistant. No shame, clinical claims, or claims that you changed data. Respond in the user's language. Return only JSON: {"message":"your helpful answer", "quest":null or {"title":"action", "minutes":30, "xp":40, "skillId":"existing ID or null", "statIds":["existing ID"], "difficulty":"Easy or Moderate or Challenging"}}. Include a concrete optional quest when relevant. User confirms all changes. Context: ${JSON.stringify({ profile: s.profile, skills: s.skills, stats: s.stats, quests: s.quests, goals: s.goals, daily: s.daily.slice(-30) })}`,
         },
-        signal: AbortSignal.timeout(25000),
-        body: JSON.stringify({
-          model: process.env.AI_MODEL || "default",
-          messages: [
-            {
-              role: "system",
-              content: `You are a supportive personal development assistant. No shame or clinical claims. Respond in the user's language. Suggest sustainable real-world actions. Do not claim to have changed data. User context: ${JSON.stringify({ profile: s.profile, skills: s.skills, stats: s.stats, quests: s.quests, goals: s.goals, daily: s.daily })}`,
-            },
-            ...s.conversations
-              .slice(-10)
-              .map((c) => ({ role: c.role, content: c.content })),
-            { role: "user", content: message },
-          ],
-        }),
-      });
-      if (!response.ok)
-        throw new Error(
-          "AI provider is unavailable. Your data is saved; try again or disable the provider to use local guidance.",
-        );
-      const json = await response.json();
-      content = json.choices?.[0]?.message?.content;
-      if (!content) throw new Error("AI provider returned an empty response.");
+        ...s.conversations
+          .slice(-10)
+          .map((c) => ({ role: c.role, content: c.content })),
+        { role: "user", content: message },
+      ]);
+      const parsed = modelJSON(raw);
+      content = typeof parsed?.message === "string" ? parsed.message : raw;
+      action = checkedSuggestion(parsed?.quest, s.skills, s.stats);
       mode = "connected";
-      action = null;
     }
     run(
       "INSERT INTO AIConversations (user_id,role,content,created_at) VALUES (?,?,?,?)",
@@ -728,13 +807,11 @@ app.use("/api", (req, res) =>
 );
 app.use((error, req, res, next) => {
   console.error(error.message);
-  res
-    .status(400)
-    .json({
-      error: error.message.includes("SQLITE")
-        ? "Unable to save this change. Check linked items and try again."
-        : error.message,
-    });
+  res.status(400).json({
+    error: error.message.includes("SQLITE")
+      ? "Unable to save this change. Check linked items and try again."
+      : error.message,
+  });
 });
 if (existsSync("dist")) {
   app.use(express.static(resolve("dist")));
